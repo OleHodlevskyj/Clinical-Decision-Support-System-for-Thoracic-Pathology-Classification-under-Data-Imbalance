@@ -1,0 +1,29 @@
+# Ваги моделей (великі — не комітимо, качаємо з Kaggle)
+models/*.pth
+*.pth
+
+# Дані
+data/
+*.png
+
+# Висновки, графіки та PDF — лише локально
+results/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Секрети
+kaggle.json
+*.env
+
+# ОС/редактор
+.DS_Store
+.vscode/
+
+# Службові папки Gradio
+.gradio/
+flagged/
