@@ -12,6 +12,8 @@ _norm = T.Normalize(IMAGENET_MEAN, IMAGENET_STD)
 train_transform = T.Compose([
     T.Resize((IMG_SIZE, IMG_SIZE)),
     T.RandomHorizontalFlip(),
+    T.RandomAffine(degrees=10, scale=(0.9, 1.1)),
+    T.ColorJitter(brightness=0.1),
     T.ToTensor(),
     _norm,
 ])
