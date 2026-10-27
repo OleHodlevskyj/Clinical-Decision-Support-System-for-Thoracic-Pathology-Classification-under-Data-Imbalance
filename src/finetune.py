@@ -1,10 +1,4 @@
 #Донавчання (доменна адаптація) на датасеті дитячої пневмонії.
-# Стартує з навченої моделі CA-CB-Focal (NIH) і донавчає її на цільовому
-# датасеті, супервізуючи лише вихід «Пневмонія». Демонструє усунення
-# зсуву домену: AUC на тесті пневмонії зростає ~0.54 -> ~0.97.
-# Змінні середовища:
-# PNEUMONIA_DIR  — корінь датасету chest-xray-pneumonia
-# MODELS_DIR     — папка з model_CA-CB-Focal.pth
 
 import os
 import sys
@@ -20,7 +14,7 @@ from PIL import Image
 from sklearn.metrics import roc_auc_score
 
 from config import CLASS_NAMES
-from model import build_resnet50
+from model import build_model
 from dataset import train_transform, eval_transform
 
 PB = os.environ.get('PNEUMONIA_DIR', '/kaggle/input/datasets/paultimothymooney')
@@ -70,7 +64,7 @@ def main(epochs=3):
                              batch_size=64, num_workers=2, pin_memory=True)
 
     # стартуємо з навченої моделі CA-CB-Focal
-    model = build_resnet50(pretrained=False).to(device)
+    model = build_model(pretrained=False).to(device)
     model.load_state_dict(torch.load(os.path.join(MODELS_DIR, 'model_CA-CB-Focal.pth'),
                                      map_location=device))
 

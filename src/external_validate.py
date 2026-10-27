@@ -1,24 +1,3 @@
-"""Перевірка навчених моделей на НЕЗАЛЕЖНОМУ наборі даних (без навчання).
-
-Скрипт лише вимірює якість — жодного оновлення ваг не відбувається.
-Це головна відмінність від finetune.py, який донавчає модель.
-
-Очікувана структура набору (будь-яка глибина вкладеності):
-    <EXT_DIR>/**/<split>/<NEGATIVE>/*.jpeg   — знімки без патології
-    <EXT_DIR>/**/<split>/<POSITIVE>/*.jpeg   — знімки з патологією
-
-Змінні середовища:
-    EXT_DIR    — корінь незалежного набору (обов'язково)
-    MODELS_DIR — папка з .pth (за замовч. ../models)
-    SPLIT      — яку частину брати (за замовч. test)
-    POSITIVE   — назва підпапки позитивного класу (за замовч. PNEUMONIA)
-    NEGATIVE   — назва підпапки негативного класу (за замовч. NORMAL)
-    TARGET     — який вихід моделі перевіряти (за замовч. Pneumonia)
-    EXT        — розширення файлів (за замовч. jpeg)
-
-Запуск:
-    python src/external_validate.py
-"""
 import os
 import sys
 import glob
@@ -49,8 +28,6 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def collect():
-    #Шляхи та мітки. Дедуплікація за іменем файлу — деякі набори містять
-    #вкладену копію тієї самої папки, через що знімки рахувалися б двічі.
     def grab(sub):
         return {os.path.basename(f): f for f in
                 glob.glob(f'{EXT_DIR}/**/{SPLIT}/{sub}/*.{FILE_EXT}', recursive=True)}
@@ -87,7 +64,7 @@ def scores_for(model, loader, cls_idx):
 
 
 def fast_auc(y, s):
-    #AUC через ранги (Манн–Уітні) — швидше за sklearn у bootstrap-циклі
+    #AUC через ранги
     n1 = int(y.sum())
     n0 = len(y) - n1
     if n1 == 0 or n0 == 0:

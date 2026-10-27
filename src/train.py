@@ -13,7 +13,7 @@ from sklearn.metrics import roc_auc_score, f1_score, roc_curve
 
 from config import CLASS_NAMES, K_CRITICALITY, BETA, GAMMA0, LAMBDA
 from loss import CACBFocalLoss, effective_number_weights
-from model import build_resnet50
+from model import build_model
 from dataset import NIHDataset, build_image_index, train_transform, eval_transform
 
 BASE = os.environ.get('NIH_DIR', '/kaggle/input/datasets/organizations/nih-chest-xrays/data')
@@ -23,6 +23,7 @@ EPOCHS = int(os.environ.get('EPOCHS', '8'))
 PATIENCE = int(os.environ.get('PATIENCE', '3'))
 SCHEDULER = os.environ.get('SCHEDULER', 'cosine')
 SEED = int(os.environ.get('SEED', '42'))
+NUM_WORKERS = int(os.environ.get('NUM_WORKERS', '4'))
 SPLIT_SEED = 42
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -78,13 +79,14 @@ def main():
     if SUBSET and SUBSET < len(df_train):
         train_ds = Subset(train_ds, random.sample(range(len(df_train)), SUBSET))
     print(f'навчальних: {len(train_ds)}  валідація: {len(df_val)}  тест: {len(df_test)}'
-          f'   епох: {EPOCHS}  seed: {SEED}', flush=True)
+          f'   епох: {EPOCHS}  seed: {SEED}  arch: {os.environ.get("ARCH", "resnet50")}'
+          f'  workers: {NUM_WORKERS}', flush=True)
     train_loader = DataLoader(train_ds, batch_size=64, shuffle=True,
-                              num_workers=2, pin_memory=True)
+                              num_workers=NUM_WORKERS, pin_memory=True)
     val_loader = DataLoader(NIHDataset(df_val, index, eval_transform),
-                            batch_size=128, num_workers=2, pin_memory=True)
+                            batch_size=128, num_workers=NUM_WORKERS, pin_memory=True)
     test_loader = DataLoader(NIHDataset(df_test, index, eval_transform),
-                             batch_size=128, num_workers=2, pin_memory=True)
+                             batch_size=128, num_workers=NUM_WORKERS, pin_memory=True)
 
     # (назва, ваги, k, γ0, λ) — абляція
     configs = [
@@ -95,9 +97,9 @@ def main():
     ]
 
     print(f"{'Конфіг':14s}{'test AUC':>10s}{'test F1':>9s}", flush=True)
-    preds = {}
+    preds, val_preds = {}, {}
     for name, w, k, g, l in configs:
-        model = build_resnet50().to(device)
+        model = build_model().to(device)
         crit = CACBFocalLoss(w, k, g, l).to(device)
         opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
         sched = (torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=EPOCHS)
@@ -137,15 +139,20 @@ def main():
         Pt, Yt = predict(model, test_loader)
         th = youden_thresholds(Pv, Yv)
         preds[name] = Pt
+        val_preds[name] = Pv
         auc = np.mean([roc_auc_score(Yt[:, c], Pt[:, c]) for c in range(14) if Yt[:, c].sum() > 0])
         f1 = f1_score(Yt, (Pt > th).astype(int), average='macro', zero_division=0)
         print(f"{name:14s}{auc:10.3f}{f1:9.3f}   (найкраща епоха: {best_ep})", flush=True)
 
+    #валідаційні прогнози (Pv_*, Yv) потрібні, щоб пороги підбиралися не на тесті
     pdir = os.path.join(MODELS_DIR, 'predictions')
     os.makedirs(pdir, exist_ok=True)
     np.save(os.path.join(pdir, 'Yt.npy'), Yt)
+    np.save(os.path.join(pdir, 'Yv.npy'), Yv)
     for n, P in preds.items():
         np.save(os.path.join(pdir, f'P_{n}.npy'), P)
+    for n, P in val_preds.items():
+        np.save(os.path.join(pdir, f'Pv_{n}.npy'), P)
     print(f"\nПрогнози збережено: {pdir}", flush=True)
 
     print("\nAUC по класах (тест): BCE vs CA-CB-Focal", flush=True)

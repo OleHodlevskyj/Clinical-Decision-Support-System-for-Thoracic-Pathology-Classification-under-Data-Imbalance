@@ -13,7 +13,7 @@ from sklearn.metrics import roc_auc_score, f1_score, roc_curve
 from torch.utils.data import DataLoader
 
 from config import CLASS_NAMES
-from model import build_resnet50
+from model import build_model
 from dataset import NIHDataset, build_image_index, eval_transform
 
 BASE = os.environ.get('NIH_DIR', '/kaggle/input/datasets/organizations/nih-chest-xrays/data')
@@ -48,7 +48,7 @@ def main():
 
     print(f"{'Конфіг':14s}{'test AUC':>10s}{'test F1':>9s}")
     for name, path in mfiles.items():
-        m = build_resnet50(pretrained=False).to(device)
+        m = build_model(pretrained=False).to(device)
         m.load_state_dict(torch.load(path, map_location=device))
         P, Y = predict(m, loader)
         auc = np.mean([roc_auc_score(Y[:, c], P[:, c]) for c in range(14) if Y[:, c].sum() > 0])
