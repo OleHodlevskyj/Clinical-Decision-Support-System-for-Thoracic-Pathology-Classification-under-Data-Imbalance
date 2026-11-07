@@ -1,3 +1,6 @@
+#зовнішня перевірка: моделі, навчені на NIH, без донавчання оцінюються на чужому наборі
+#знімків (типово — дитяча пневмонія). друкує AUC з довірчим інтервалом, чутливість
+#і специфічність для одного класу. налаштування — змінними середовища
 import os
 import sys
 import glob
@@ -14,12 +17,16 @@ from config import CLASS_NAMES
 from model import build_resnet50
 from dataset import eval_transform
 
+#папка з набором і частина (test або train)
 EXT_DIR = os.environ.get('EXT_DIR', '/kaggle/input/chest-xray-pneumonia/chest_xray')
 MODELS_DIR = os.environ.get('MODELS_DIR', os.path.join(os.path.dirname(__file__), '..', 'models'))
 SPLIT = os.environ.get('SPLIT', 'test')
+#назви підпапок з хворими і здоровими
 POSITIVE = os.environ.get('POSITIVE', 'PNEUMONIA')
 NEGATIVE = os.environ.get('NEGATIVE', 'NORMAL')
+#який із 14 виходів моделі оцінювати
 TARGET = os.environ.get('TARGET', 'Pneumonia')
+#розширення файлів знімків
 FILE_EXT = os.environ.get('EXT', 'jpeg')
 N_BOOT = 1000
 SEED = 42
@@ -27,11 +34,14 @@ SEED = 42
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
+#шляхи до знімків і мітки: спершу здорові (0), потім хворі (1)
 def collect():
+    #усі файли з підпапки sub частини SPLIT; словник за назвою прибирає дублікати
     def grab(sub):
         return {os.path.basename(f): f for f in
                 glob.glob(f'{EXT_DIR}/**/{SPLIT}/{sub}/*.{FILE_EXT}', recursive=True)}
     neg, pos = grab(NEGATIVE), grab(POSITIVE)
+    #без хворих або без здорових AUC не порахувати, тому зупиняємось з підказкою
     if not neg or not pos:
         raise SystemExit(
             f'Не знайдено знімків у {EXT_DIR} (split={SPLIT}, {NEGATIVE}/{POSITIVE}, *.{FILE_EXT}).\n'
@@ -42,6 +52,7 @@ def collect():
     return files, labels
 
 
+#набір даних, що повертає лише підготовлені знімки (мітки зберігаються окремо)
 class FolderDataset(Dataset):
     def __init__(self, files):
         self.files = files
@@ -53,8 +64,8 @@ class FolderDataset(Dataset):
         return eval_transform(Image.open(self.files[i]).convert('RGB'))
 
 
+#ймовірності цільового класу для всіх знімків
 def scores_for(model, loader, cls_idx):
-    #Ймовірності цільового класу для всіх знімків
     model.eval()
     out = []
     with torch.no_grad():
@@ -63,8 +74,8 @@ def scores_for(model, loader, cls_idx):
     return np.concatenate(out)
 
 
+#швидкий AUC через ранги, як у bootstrap_ci.py
 def fast_auc(y, s):
-    #AUC через ранги
     n1 = int(y.sum())
     n0 = len(y) - n1
     if n1 == 0 or n0 == 0:
@@ -75,8 +86,8 @@ def fast_auc(y, s):
     return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0)
 
 
+#95 % довірчий інтервал AUC: n разів AUC на випадковій вибірці з поверненням
 def bootstrap_ci(y, s, n=N_BOOT):
-    #95 % довірчий інтервал AUC
     rng = np.random.default_rng(SEED)
     vals = []
     for _ in range(n):
@@ -87,13 +98,15 @@ def bootstrap_ci(y, s, n=N_BOOT):
     return np.percentile(vals, [2.5, 97.5])
 
 
+#чутливість і специфічність у точці максимуму індексу Юдена
 def operating_point(y, s):
-    #Чутливість і специфічність у точці максимуму індексу Юдена
     fpr, tpr, _ = roc_curve(y, s)
     i = int(np.argmax(tpr - fpr))
+    #специфічність — частка правильно названих здоровими, тобто 1 - fpr
     return tpr[i], 1 - fpr[i]
 
 
+#оцінює кожен файл model_*.pth і друкує таблицю
 def main():
     cls_idx = CLASS_NAMES.index(TARGET)
     files, y = collect()

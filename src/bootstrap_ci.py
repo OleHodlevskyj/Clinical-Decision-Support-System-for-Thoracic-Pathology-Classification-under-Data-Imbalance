@@ -1,8 +1,13 @@
+#перевірка статистичної значущості методом bootstrap: тестову вибірку багато разів
+#випадково перебирають з поверненням і щоразу рахують AUC. розкид результатів дає
+#95 % довірчий інтервал (ДІ); різниця значуща, якщо її ДІ не містить нуля.
+#запуск: python src/bootstrap_ci.py [папка з прогнозами або файл .npz]
 import os
 import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+#щоб українські літери не ламалися в консолі Windows
 try:
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 except Exception:
@@ -13,62 +18,78 @@ import numpy as np
 from config import CLASS_NAMES, UA_LABELS
 
 _MODELS = os.path.join(os.path.dirname(__file__), '..', 'models')
+#типово — папка models/predictions, а якщо її немає — старий архів predictions.npz
 _DEFAULT = (os.path.join(_MODELS, 'predictions')
             if os.path.isdir(os.path.join(_MODELS, 'predictions'))
             else os.path.join(_MODELS, 'predictions.npz'))
+#кількість повторних вибірок
 N_BOOT = 1000
 #опорна конфігурація і та, яку з нею порівнюємо по класах
 BASELINE = os.environ.get('BASELINE', 'BCE')
 TARGET = os.environ.get('TARGET', 'CA-CB-Focal')
+#бажаний порядок рядків у таблицях; решта назв іде після них за абеткою
 _ORDER = ['BCE', 'Focal', 'CB-Focal', 'CA-CB-Focal',
           'CACB_lam0.00', 'CACB_lam0.25', 'CACB_lam0.50', 'CACB_lam1.00']
 
 
+#упорядковує назви конфігурацій: спершу відомі в порядку _ORDER, потім інші
 def _sorted(names):
     known = [n for n in _ORDER if n in names]
     return known + sorted(n for n in names if n not in _ORDER)
 
 
+#швидкий AUC-ROC одного класу без sklearn (тисяча повторів зі sklearn рахувалася б довго);
+#y — мітки 0/1, s — ймовірності
 def fast_auc(y, s):
     #AUC через ранги: (сума рангів позитивів − n1(n1+1)/2) / (n1·n0)
     n1 = int(y.sum())
     n0 = len(y) - n1
+    #без хворих або без здорових AUC не визначений
     if n1 == 0 or n0 == 0:
         return np.nan
+    #ранг — місце знімка в списку, впорядкованому за ймовірністю (від 1)
     order = np.argsort(s, kind='stable')
     ranks = np.empty(len(s), dtype=np.float64)
     ranks[order] = np.arange(1, len(s) + 1)
     return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0)
 
 
+#macro AUC на підмножині знімків idx: середнє по класах, де AUC визначений
 def macro_auc(Y, P, idx):
     aucs = [fast_auc(Y[idx, c], P[idx, c]) for c in range(Y.shape[1])]
     aucs = [a for a in aucs if not np.isnan(a)]
     return float(np.mean(aucs)) if aucs else np.nan
 
 
+#межі довірчого інтервалу: для 95 % — 2,5-й і 97,5-й процентилі значень
 def ci(values, level=95):
     lo = (100 - level) / 2
     return np.nanpercentile(values, lo), np.nanpercentile(values, 100 - lo)
 
 
+#n_boot наборів номерів знімків; кожен набір — n випадкових номерів з повтореннями
 def make_boots(n, n_boot=N_BOOT, seed=42):
     #однакові передвибірки для всіх моделей — основа парного порівняння
     rng = np.random.default_rng(seed)
     return [rng.integers(0, n, n) for _ in range(n_boot)]
 
 
+#різниця AUC двох моделей для класу c і її довірчий інтервал
 def class_diff_ci(Y, p_target, p_base, c, boots):
+    #різниця на всій тестовій вибірці
     point = fast_auc(Y[:, c], p_target[:, c]) - fast_auc(Y[:, c], p_base[:, c])
+    #та сама різниця на кожній повторній вибірці
     diffs = np.array([fast_auc(Y[b, c], p_target[b, c]) - fast_auc(Y[b, c], p_base[b, c])
                       for b in boots])
     lo, hi = ci(diffs)
     return point, lo, hi
 
 
+#читає правильні мітки і прогнози всіх моделей з папки .npy або з одного архіву .npz
 def load_predictions(path):
     if os.path.isdir(path):
         Y = np.load(os.path.join(path, 'Yt.npy'))
+        #з P_BCE.npy виходить BCE
         names = [f[2:-4] for f in os.listdir(path) if f.startswith('P_') and f.endswith('.npy')]
         return Y, {c: np.load(os.path.join(path, f'P_{c}.npy')) for c in _sorted(names)}
     d = np.load(path)
@@ -76,14 +97,18 @@ def load_predictions(path):
     return d['Yt'], {c: d[f'P_{c}'] for c in _sorted(names)}
 
 
+#друкує три таблиці: macro AUC з ДІ, різниці з базовою моделлю і різниці по класах
 def main():
+    #шлях можна передати першим аргументом командного рядка
     Y, P = load_predictions(sys.argv[1] if len(sys.argv) > 1 else _DEFAULT)
+    #мітки 0/1 у найменшому цілому типі, щоб економити пам'ять
     Y = Y.astype(np.int8)
     n = len(Y)
     print(f"Тестових прикладів: {n};  моделей: {len(P)};  ітерацій bootstrap: {N_BOOT}",
           flush=True)
 
     boots = make_boots(n)
+    #номери всіх знімків — для значення на повній вибірці
     all_idx = np.arange(n)
 
     #macro AUC кожної конфігурації з ДІ
@@ -102,9 +127,11 @@ def main():
         for c in boot_macro:
             if c == BASELINE:
                 continue
+            #різниці на тих самих повторних вибірках (тому «парний»)
             diffs = boot_macro[c] - boot_macro[BASELINE]
             point = macro_auc(Y, P[c], all_idx) - macro_auc(Y, P[BASELINE], all_idx)
             lo, hi = ci(diffs)
+            #значуща, якщо весь інтервал лежить по один бік від нуля
             verdict = 'значуща' if (lo > 0 or hi < 0) else 'НЕ значуща (ДІ містить 0)'
             print(f"{c:14s} Δ={point:+.3f}   [{lo:+.3f}; {hi:+.3f}]   {verdict}", flush=True)
 
@@ -117,6 +144,7 @@ def main():
             if npos == 0:
                 continue
             point, lo, hi = class_diff_ci(Y, P[TARGET], P[BASELINE], c, boots)
+            #*** — значуще краще, «(гірше)» — значуще гірше
             mark = '  ***' if lo > 0 else ('  (гірше)' if hi < 0 else '')
             name = UA_LABELS.get(CLASS_NAMES[c], CLASS_NAMES[c])
             print(f"{name:20s}{npos:6d}{point:+8.3f}      [{lo:+.3f}; {hi:+.3f}]{mark}",

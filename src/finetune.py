@@ -1,4 +1,7 @@
-#Донавчання (доменна адаптація) на датасеті дитячої пневмонії.
+#донавчання (доменна адаптація) на датасеті дитячої пневмонії:
+#навчена модель CA-CB-Focal кілька епох довчається лише на виході «Пневмонія»,
+#щоб перевірити, чи швидко вона пристосовується до знімків з іншої лікарні.
+#у застосунку ця модель не використовується
 
 import os
 import sys
@@ -17,12 +20,16 @@ from config import CLASS_NAMES
 from model import build_model
 from dataset import train_transform, eval_transform
 
+#папка з набором Chest X-Ray Images (Pneumonia) на Kaggle
 PB = os.environ.get('PNEUMONIA_DIR', '/kaggle/input/datasets/paultimothymooney')
 MODELS_DIR = os.environ.get('MODELS_DIR', os.path.join(os.path.dirname(__file__), '..', 'models'))
+#номер виходу «Пневмонія» серед 14
 PN = CLASS_NAMES.index('Pneumonia')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
+#збирає шляхи до знімків частини split (train або test) і мітки: NORMAL — 0, PNEUMONIA — 1;
+#словник за назвою файлу прибирає дублікати, якщо набір розпаковано в кількох копіях
 def collect(split):
     nrm = {os.path.basename(f): f
            for f in glob.glob(f'{PB}/**/{split}/NORMAL/*.jpeg', recursive=True)}
@@ -31,6 +38,7 @@ def collect(split):
     return list(nrm.values()) + list(pnu.values()), [0] * len(nrm) + [1] * len(pnu)
 
 
+#набір даних PyTorch: знімок і одна мітка (є пневмонія чи ні)
 class PneumoniaDataset(Dataset):
     def __init__(self, files, labels, transform):
         self.files, self.labels, self.tf = files, labels, transform
@@ -43,16 +51,19 @@ class PneumoniaDataset(Dataset):
         return img, torch.tensor(float(self.labels[i]))
 
 
+#AUC-ROC моделі для пневмонії на всіх знімках loader
 def pneumonia_auc(model, loader):
     model.eval()
     scores, ys = [], []
     with torch.no_grad():
         for x, y in loader:
+            #з 14 ймовірностей беремо лише стовпець пневмонії
             scores.append(torch.sigmoid(model(x.to(device)))[:, PN].cpu().numpy())
             ys.append(y.numpy())
     return roc_auc_score(np.concatenate(ys), np.concatenate(scores))
 
 
+#AUC до донавчання -> кілька епох донавчання -> AUC після, збереження ваг
 def main(epochs=3):
     train_f, train_y = collect('train')
     test_f, test_y = collect('test')
@@ -63,20 +74,23 @@ def main(epochs=3):
     test_loader = DataLoader(PneumoniaDataset(test_f, test_y, eval_transform),
                              batch_size=64, num_workers=2, pin_memory=True)
 
-    # стартуємо з навченої моделі CA-CB-Focal
+    #стартуємо з навченої моделі CA-CB-Focal
     model = build_model(pretrained=False).to(device)
     model.load_state_dict(torch.load(os.path.join(MODELS_DIR, 'model_CA-CB-Focal.pth'),
                                      map_location=device))
 
     print(f"AUC ДО донавчання: {pneumonia_auc(model, test_loader):.3f}")
 
+    #крок навчання в 10 разів менший, ніж у train.py, щоб не зруйнувати вже навчене
     opt = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
+    #звичайна бінарна крос-ентропія, бо клас лише один
     bce = nn.BCEWithLogitsLoss()
     for ep in range(epochs):
         model.train()
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
             opt.zero_grad()
+            #помилка рахується лише за виходом пневмонії
             bce(model(x)[:, PN], y).backward()
             opt.step()
         print(f"  епоха {ep + 1}/{epochs} -> AUC: {pneumonia_auc(model, test_loader):.3f}")
