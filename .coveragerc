@@ -1,0 +1,13 @@
+[run]
+include =
+    src/loss.py
+    src/make_thresholds.py
+    src/config.py
+    src/model.py
+    app/app.py
+
+[report]
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
