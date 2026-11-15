@@ -20,8 +20,8 @@ from loss import CACBFocalLoss, effective_number_weights
 from model import build_model
 from dataset import NIHDataset, build_image_index, train_transform, eval_transform
 
-#налаштування запуску; кожне можна змінити змінною середовища без правки коду
-#папка з набором даних NIH (типово — шлях на Kaggle)
+#налаштування запуску
+#папка з набором даних NIH
 BASE = os.environ.get('NIH_DIR', '/kaggle/input/datasets/organizations/nih-chest-xrays/data')
 #куди зберігати ваги й прогнози
 MODELS_DIR = os.environ.get('MODELS_DIR', os.path.join(os.path.dirname(__file__), '..', 'models'))
@@ -55,7 +55,7 @@ def prepare_dataframes():
     #лишаємо лише ті рядки, для яких файл знімка справді є на диску
     df = df[df['Image Index'].isin(index)].copy()
 
-    #офіційний поділ авторів набору: train_val_list — для навчання, test_list — для тесту
+    #поділ набору: train_val_list — для навчання, test_list — для тесту
     tv = set(pd.read_csv(os.path.join(BASE, 'train_val_list.txt'), header=None)[0])
     ts = set(pd.read_csv(os.path.join(BASE, 'test_list.txt'), header=None)[0])
     df_tv = df[df['Image Index'].isin(tv)].copy()
