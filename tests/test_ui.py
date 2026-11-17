@@ -102,9 +102,9 @@ def stub_compare(monkeypatch):
 def test_numbers_use_decimal_comma(stub_compare, monkeypatch):
     #усі числа, які бачить лікар, записано з десятковою комою: «x2,85», «p=0,69».
     #шукаються дві цифри через крапку, тобто число з крапкою; теплова карта тут не потрібна
-    monkeypatch.setattr(app, '_gradcam', lambda model, pil, cls: None)
-    labels, _, txt = app.diagnose(object(), list(app.MODES)[0])
-    texts = list(labels) + [txt, stub_compare]
+    monkeypatch.setattr(app, '_gradcams', lambda model, pil, classes: [None] * len(classes))
+    labels, cam, txt = app.diagnose(object(), list(app.MODES)[0])
+    texts = list(labels) + [txt, stub_compare] + [cap for _, cap in cam or []]
     texts += [cell for row in app.priority(object(), list(app.MODES)[0], *[1.0] * 14) for cell in row]
     assert not [t for t in texts if re.search(r'\d\.\d', str(t))]
     assert app._num(0.6912) == '0,69' and app._num(2.85, 1) == '2,9'
@@ -166,3 +166,9 @@ def test_small_probabilities_not_shown_as_zero(x, shown):
     #у базової моделі BCE пороги рідкісних патологій близько 0,002: із двома знаками після коми
     #лікар побачив би «p=0,00 / поріг 0,00», тому знаків стільки, щоб було видно дві значущі цифри
     assert app._prob(x) == shown
+
+
+def test_criticality_named_in_full():
+    #керівник роботи: лікар бачить повну назву коефіцієнта, а не позначку k_c з формул
+    assert 'Коефіцієнт клінічної критичності' in app.out.headers
+    assert not [h for h in app.out.headers if 'k_c' in h]

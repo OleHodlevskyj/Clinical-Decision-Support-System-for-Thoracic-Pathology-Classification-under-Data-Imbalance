@@ -28,7 +28,7 @@ def stub(monkeypatch):
     #тільки від заданих чисел і його можна передбачити наперед
     probs = {}
     monkeypatch.setattr(app, '_probs', lambda model, pil: probs[model])
-    monkeypatch.setattr(app, '_gradcam', lambda model, pil, cls: 'CAM:%d' % cls)
+    monkeypatch.setattr(app, '_gradcams', lambda model, pil, classes: ['CAM:%d' % c for c in classes])
     monkeypatch.setattr(app, 'M_BCE', 'BCE')
     probs[app.M_CA] = _p()
     probs['BCE'] = _p()
@@ -80,7 +80,7 @@ def test_diagnose_signal_strength(stub, ratio, head):
     assert len(labels) == 14
     if ratio >= STUB_BANDS[0]:
         assert UA['Pneumothorax'] in txt
-        assert cam == 'CAM:%d' % IDX['Pneumothorax']
+        assert cam == [('CAM:%d' % IDX['Pneumothorax'], '%s x%s' % (UA['Pneumothorax'], app._num(ratio)))]
     else:
         assert 'Жодна патологія не перевищує' in txt
         assert 'теплова карта не будується' in txt
@@ -90,9 +90,12 @@ def test_diagnose_signal_strength(stub, ratio, head):
 def test_diagnose_lists_all_signals_strongest_first(stub):
     #усі патології вище межі сигналу перелічуються в тексті, найсильніша — першою
     stub[app.M_CA] = _p(Edema=1.6, Mass=2.5)
-    _, _, txt = app.diagnose(object(), YOUDEN)
+    _, cam, txt = app.diagnose(object(), YOUDEN)
     listed = txt.split('**')[-2]
     assert listed == '%s, %s' % (UA['Mass'], UA['Edema'])
+    #теплова карта є для кожної патології з висновку, у тому самому порядку, з назвою і кратністю
+    assert [img for img, _ in cam] == ['CAM:%d' % IDX['Mass'], 'CAM:%d' % IDX['Edema']]
+    assert [cap for _, cap in cam] == ['%s x2,50' % UA['Mass'], '%s x1,60' % UA['Edema']]
 
 
 def test_mode_changes_decision(stub):
@@ -151,3 +154,7 @@ def test_real_inference_path_on_stub_weights(xray):
     assert p.shape == (14,) and ((p >= 0) & (p <= 1)).all()
     cam = app._gradcam(app.M_CA, xray, int(np.argmax(p)))
     assert isinstance(cam, Image.Image) and cam.width > 0
+    #кілька карт за один прохід: по одній на кожен клас, і для різних класів вони різні
+    maps = app._gradcams(app.M_CA, xray, [0, 13])
+    assert len(maps) == 2 and all(isinstance(m, Image.Image) for m in maps)
+    assert not np.array_equal(np.asarray(maps[0]), np.asarray(maps[1]))

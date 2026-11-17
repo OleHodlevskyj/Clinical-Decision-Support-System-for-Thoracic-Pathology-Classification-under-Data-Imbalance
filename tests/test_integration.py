@@ -48,7 +48,7 @@ def test_dicom_to_diagnosis(real_app, tmp_path, gradient):
     for mode in real_app.MODES:
         labels, cam, txt = real_app.diagnose(img, mode)
         assert len(labels) == 14
-        assert isinstance(cam, Image.Image)
+        assert cam and all(isinstance(m, Image.Image) for m, _ in cam)
         assert txt.startswith('### ')
         rows = real_app.priority(img, mode, *[1.0] * 14)
         assert len(rows) == 14

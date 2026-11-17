@@ -19,10 +19,8 @@ import pydicom
 from pydicom.pixels import apply_voi_lut
 from torchvision import transforms as T
 from PIL import Image
+#matplotlib потрібен лише для кольорової шкали теплової карти
 import matplotlib
-#Agg малює картинки в пам'ять без відкриття окремих вікон matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
 #спільні налаштування проєкту: назви класів, українські підписи, критичність k_c,
 #параметри нормалізації і розмір зображення
@@ -106,39 +104,49 @@ def _probs(model, pil):
         return torch.sigmoid(model(x))[0].cpu().numpy()
 
 
-#будує теплову карту Grad-CAM: які ділянки знімка найбільше вплинули на клас cls
-def _gradcam(model, pil, cls):
+#розмір сторони картинки з тепловою картою, у пікселях, і прозорість кольорової карти над знімком
+CAM_SIZE, CAM_ALPHA = 400, 0.45
+#кольорова шкала jet: синій — ділянка майже не вплинула на відповідь, червоний — вплинула найбільше
+_JET = matplotlib.colormaps['jet']
+
+
+#будує теплові карти Grad-CAM для кількох класів: які ділянки знімка найбільше вплинули на кожен.
+#прохід мережею один на всі класи, а градієнт рахується лише від блоку layer4 до виходу
+def _gradcams(model, pil, classes):
     x = _tf(pil.convert('RGB')).unsqueeze(0).to(device)
     store = {}
-    #хук на останньому блоці layer4: перший запам'ятовує його вихід (карти ознак),
-    #другий — градієнт, тобто наскільки кожна карта впливає на відповідь
-    h1 = model.layer4.register_forward_hook(lambda m, i, o: store.__setitem__('a', o))
-    h2 = model.layer4.register_full_backward_hook(lambda m, gi, go: store.__setitem__('g', go[0]))
-    out = model(x)#прохід уперед: отримуємо 14 логітів, хук 1 зберігає карти
-    model.zero_grad()#стерти старі градієнти, якщо вони лишилися
-    #зворотний прохід від виходу потрібного класу заповнює градієнт у store
-    out[0, cls].backward()
-    A, G = store['a'][0], store['g'][0]
-    #вага кожної карти — середній градієнт по ній; зважена сума карт дає теплову карту,
-    #relu лишає лише ділянки, що підсилюють відповідь
-    cam = torch.relu((G.mean(dim=(1, 2))[:, None, None] * A).sum(0))
-    #зводимо до діапазону 0..1; 1e-8 захищає від ділення на нуль
-    cam = cam / (cam.max() + 1e-8)
-    #хуки знімаємо, щоб вони не спрацьовували під час наступних звичайних прогнозів
-    h1.remove(); h2.remove()
-    #карта має розмір 7 x 7, тому розтягуємо її до розміру знімка
-    cam = np.array(Image.fromarray((cam.detach().cpu().numpy() * 255).astype('uint8'))
-                   .resize((IMG_SIZE, IMG_SIZE))) / 255.
-    base = np.array(pil.convert('RGB').resize((IMG_SIZE, IMG_SIZE)))
-    #накладаємо напівпрозору кольорову карту на знімок; subplots_adjust прибирає білі поля навколо
-    fig, ax = plt.subplots(figsize=(4, 4))
-    fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
-    ax.imshow(base); ax.imshow(cam, cmap='jet', alpha=0.45); ax.axis('off')
-    #малюємо рисунок у пам'яті й перетворюємо його на картинку для інтерфейсу
-    fig.canvas.draw()
-    out_img = Image.fromarray(np.array(fig.canvas.buffer_rgba()))
-    plt.close(fig)
-    return out_img
+    #хук на останньому блоці layer4 запам'ятовує його вихід, тобто карти ознак
+    h = model.layer4.register_forward_hook(lambda m, i, o: store.__setitem__('a', o))
+    try:
+        #прохід уперед з градієнтами: 14 логітів, а хук зберігає карти ознак
+        out = model(x)
+    finally:
+        #хук знімаємо, щоб він не спрацьовував під час наступних звичайних прогнозів
+        h.remove()
+    A = store['a']
+    base = np.asarray(pil.convert('RGB').resize((CAM_SIZE, CAM_SIZE)), dtype=np.float32) / 255
+    maps = []
+    for cls in classes:
+        #градієнт виходу класу cls за картами ознак, тобто наскільки кожна карта впливає на відповідь;
+        #retain_graph лишає обчислення проходу вперед для наступного класу
+        G, = torch.autograd.grad(out[0, cls], A, retain_graph=True)
+        #вага кожної карти — середній градієнт по ній; зважена сума карт дає теплову карту,
+        #relu лишає лише ділянки, що підсилюють відповідь
+        cam = torch.relu((G[0].mean(dim=(1, 2))[:, None, None] * A[0]).sum(0))
+        #зводимо до діапазону 0..1; 1e-8 захищає від ділення на нуль
+        cam = (cam / (cam.max() + 1e-8)).detach().cpu().numpy()
+        #карта має розмір 7 x 7, тому розтягуємо її до розміру картинки
+        cam = np.asarray(Image.fromarray((cam * 255).astype('uint8'))
+                         .resize((CAM_SIZE, CAM_SIZE), Image.BICUBIC), dtype=np.float32) / 255
+        #накладаємо напівпрозору кольорову карту на знімок; [..., :3] відкидає канал прозорості шкали
+        mix = (1 - CAM_ALPHA) * base + CAM_ALPHA * _JET(cam)[..., :3]
+        maps.append(Image.fromarray((mix * 255).astype('uint8')))
+    return maps
+
+
+#одна теплова карта для класу cls; нею користуються тести й вимірювання швидкодії
+def _gradcam(model, pil, cls):
+    return _gradcams(model, pil, [cls])[0]
 
 
 #число з десятковою комою
@@ -236,7 +244,7 @@ def _clear_results(pil):
     return {}, None, hint, row, {}, {}, hint
 
 
-#вкладка «Діагностика»: ймовірності, сила сигналу і Grad-CAM для найсильнішого класу
+#вкладка «Діагностика»: ймовірності, сила сигналу і Grad-CAM для кожної патології з висновку
 def diagnose(pil, mode_label):
     if pil is None:
         return {}, None, "Завантажте знімок."
@@ -246,7 +254,7 @@ def diagnose(pil, mode_label):
     p = _probs(model, pil)
     #кратність: у скільки разів ймовірність більша за поріг свого класу
     ratio = p / thr
-    #клас з найбільшою кратністю визначає заголовок і теплову карту
+    #клас з найбільшою кратністю визначає заголовок і першу теплову карту
     top = int(np.argmax(ratio))
     r = ratio[top]
 
@@ -265,15 +273,20 @@ def diagnose(pil, mode_label):
         head, note = ("Виражений сигнал: %s" % UA[top],
                       "Кратність x%s — значно вище порога класу." % _num(r, 1))
 
-    #без жодного сигналу карта показувала б випадкову ділянку, наприклад живіт,
-    #і могла б ввести лікаря в оману, тому вона будується лише тоді, коли є що показати
-    cam = _gradcam(model, pil, top) if r >= b_weak else None
     #усі патології, що перевищують межу слабкого сигналу, від найсильнішої до найслабшої
-    above = [UA[i] for i in np.argsort(ratio)[::-1] if ratio[i] >= b_weak]
+    above = [int(i) for i in np.argsort(ratio)[::-1] if ratio[i] >= b_weak]
+    #теплова карта для кожної такої патології, перша — для найсильнішої; підпис — назва і кратність.
+    #без жодного сигналу карта показувала б випадкову ділянку, наприклад живіт,
+    #і могла б ввести лікаря в оману, тому тоді карт немає зовсім
+    maps = _gradcams(model, pil, above) if above else []
+    cam = [(m, "%s x%s" % (UA[i], _num(ratio[i]))) for m, i in zip(maps, above)] or None
     #chr(10) — символ нового рядка
     nl = chr(10)
     txt = "### %s" % head + nl + note + nl + nl
-    txt += ("Сигнал вище межі (кратність від %s): **%s**" % (_num(b_weak), ', '.join(above))
+    #напис називає, з чим порівнюється сигнал: межа слабкого сигналу — це рівень,
+    #звичайний для знімка без патологій (половина таких знімків має нижчу кратність)
+    txt += ("Сильніше, ніж зазвичай на знімку без патологій (кратність від %s): **%s**"
+            % (_num(b_weak), ', '.join(UA[i] for i in above))
             if above else "_Жодна патологія не перевищує межі сигналу, тому теплова карта не будується._")
     return _ranked(p, thr), cam, txt
 
@@ -384,7 +397,10 @@ with gr.Blocks(title="Аналіз рентгенів", delete_cache=(CACHE_CHEC
                     #показує 6 патологій з найдовшими смужками
                     lbl = gr.Label(num_top_classes=6, label="Ймовірності патологій", show_heading=False)
                 with gr.Group():
-                    cam = gr.Image(label="Grad-CAM — область уваги моделі", height=300)
+                    #галерея карт: велика — для вибраної патології, під нею мініатюри решти
+                    #патологій з висновку; клік по мініатюрі показує її карту великою
+                    cam = gr.Gallery(label="Grad-CAM — область уваги моделі", height=360,
+                                     preview=True, selected_index=0, object_fit="contain")
                 info = gr.Markdown()
         #після вибору файлу DICOM його зображення потрапляє в поле знімка
         dcm.upload(load_dicom, dcm, [inp, dcm_info])
@@ -394,14 +410,17 @@ with gr.Blocks(title="Аналіз рентгенів", delete_cache=(CACHE_CHEC
         inp.upload(_reset_dicom, None, [dcm, dcm_info])
         inp.clear(_reset_dicom, None, [dcm, dcm_info])
 
-    with gr.Tab("Критичність (k_c)"):
+    with gr.Tab("Критичність"):
         gr.Markdown("Базовий поріг кожної патології підібрано на валідаційній вибірці за режимом, "
-                    "обраним на вкладці «Діагностика». Лікар задає **критичність**, і вона визначає "
-                    "порядок перегляду: **пріоритет = (ймовірність ÷ базовий поріг) × k_c**. "
-                    "Небезпечні патології піднімаються вгору списку навіть за нижчої ймовірності. "
-                    "*(спершу проаналізуйте знімок на вкладці «Діагностика»)*")
+                    "обраним на вкладці «Діагностика». Лікар задає **коефіцієнт клінічної критичності**, "
+                    "і він визначає порядок перегляду: **пріоритет = (ймовірність ÷ базовий поріг) × "
+                    "коефіцієнт клінічної критичності**. Небезпечні патології піднімаються вгору списку "
+                    "навіть за нижчої ймовірності. *(спершу проаналізуйте знімок на вкладці «Діагностика»)*")
         with gr.Row():
             with gr.Column(scale=4):
+                #назва повзунків: без неї незрозуміло, що саме лікар задає для кожної патології
+                gr.Markdown("**Коефіцієнт клінічної критичності**: 1 — найменш небезпечні патології, "
+                            "3 — невідкладні стани")
                 with gr.Group():
                     #14 повзунків від 1 до 3 з кроком 0,5; початкові значення — з config.py
                     ks = [gr.Slider(1.0, 3.0, K_CRITICALITY[c], step=0.5, label=UA_LABELS[c])
@@ -411,8 +430,8 @@ with gr.Blocks(title="Аналіз рентгенів", delete_cache=(CACHE_CHEC
                 #ширини колонок у відсотках, а wrap переносить довгі заголовки на другий рядок:
                 #без цього «Базовий поріг» обрізався, а «Результат» ховався за прокруткою
                 out = gr.Dataframe(headers=["Патологія", "Ймовірність", "Базовий поріг",
-                                            "k_c", "Пріоритет", "Результат"],
-                                   column_widths=["26%", "15%", "15%", "10%", "15%", "19%"], wrap=True)
+                                            "Коефіцієнт клінічної критичності", "Пріоритет", "Результат"],
+                                   column_widths=["22%", "13%", "13%", "20%", "14%", "18%"], wrap=True)
         #таблиця перераховується за кнопкою і щоразу, коли лікар відпускає повзунок
         prio_btn.click(priority, [inp, mode] + ks, out)
         for k in ks:
